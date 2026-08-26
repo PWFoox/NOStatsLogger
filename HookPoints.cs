@@ -1,20 +1,18 @@
 using System;
 using System.Collections.Generic;
-using System.Threading.Tasks;
 using HarmonyLib;
 using NuclearOption.Networking;
 
 namespace NOStatsLogger
 {
-    // ВАЖНО: здесь патчатся ТОЛЬКО те методы/события Aircraft, которые мы
-    // подтвердили через dnSpy (см. дамп класса Aircraft из чата):
+    // ВАЖНО: здесь патчатся следующие точки, все подтверждены через dnSpy:
     //   - private void OnStartClient()   -> вылет + точка, где Player уже не null
-    //   - public event Action OnTouchdown -> посадка
-    //   - public event Action onEject     -> катапультирование
+    //   - public event Action OnTouchdown -> только диагностика (см. комментарий ниже)
+    //   - public void StartEjectionSequence() -> катапультирование (основной источник)
+    //   - public event Action onEject     -> катапультирование (диагностика, не основной источник)
     //   - public override void UnitDisabled(bool oldState, bool newState) -> сбитие/разбитие
-    //
-    // Фраги (FactionHQ.RewardPlayer) сюда пока НЕ добавлены — ждём дамп
-    // класса FactionHQ из dnSpy, чтобы не гадать с сигнатурой.
+    //   - MessageManager.UserCode_TargetCreditMessage_106951341 -> фраги (воздух/земля)
+    //   - Player.SetAircraft(Aircraft) -> завершение вылета при пересадке в другой самолёт
     [HarmonyPatch]
     internal static class HookPoints
     {
@@ -63,54 +61,24 @@ namespace NOStatsLogger
                 }
                 hookedInstances.Add(id);
 
-                // ---- Посадка ----
-                // ВАЖНО: OnTouchdown — чисто физическое событие (пересечение порога
-                // высоты), оно срабатывает и при нормальной посадке, и при падении
-                // после того как самолёт сбили. Поэтому не завершаем вылет по
-                // OnTouchdown сразу, а ждём — вдруг игрок в ближайшие секунды
-                // катапультируется (см. StartEjectionSequence ниже) или самолёт
-                // будет официально помечен как disabled (UnitDisabled).
-                //
-                // Окно увеличено до 3 секунд: после жёсткого приземления/крушения
-                // игроку нужно время среагировать и нажать катапультирование, а
-                // само событие onEject (см. ниже) в этот момент часто НЕ срабатывает
-                // вообще (см. комментарий у StartEjectionSequence) — поэтому именно
-                // этот таймаут остаётся резервным способом поймать "просто посадку".
+                // ---- Посадка (только диагностика, НЕ завершает вылет!) ----
+                // ВАЖНО: OnTouchdown срабатывает и при обычной посадке для дозаправки/
+                // перевооружения с последующим повторным взлётом в ТОМ ЖЕ самолёте —
+                // OnStartClient в этом случае повторно не вызывается (тот же инстанс),
+                // поэтому если завершать вылет здесь, весь дальнейший полёт (включая
+                // возможные новые фраги или итоговое крушение) потеряется.
+                // Реальное завершение вылета происходит только через UnitDisabled,
+                // StartEjectionSequence, или через переход в другой самолёт
+                // (см. патч на Player.SetAircraft ниже).
                 __instance.OnTouchdown += () =>
                 {
-                    var state = FlightState.Current;
-                    if (!state.Active || state.TrackedAircraft != __instance)
+                    if (FlightState.Current.TrackedAircraft != __instance)
                         return;
-
-                    if (state.PendingLandConfirmation)
-                    {
-                        // Уже ждём подтверждения (самолёт мог подпрыгнуть на посадке
-                        // и вызвать OnTouchdown несколько раз подряд) — не плодим
-                        // повторные отложенные проверки.
-                        return;
-                    }
-                    state.PendingLandConfirmation = true;
 
                     Plugin.Log?.LogInfo(
-                        $"[ПОСАДКА-кандидат] {aircraftName} (instanceId={id}), " +
-                        "ждём 3с — не окажется ли это на самом деле сбитием/катапультированием..."
+                        $"[ПОСАДКА] {aircraftName} (instanceId={id}) — коснулся земли " +
+                        "(вылет не завершается автоматически, см. комментарий в коде)."
                     );
-
-                    Task.Delay(3000).ContinueWith(_ =>
-                    {
-                        if (state.Active && state == FlightState.Current)
-                        {
-                            Plugin.Log?.LogInfo($"[ПОСАДКА] {aircraftName} (instanceId={id}) — подтверждено.");
-                            state.EndFlight(FlightState.ResultLanded);
-                        }
-                        else
-                        {
-                            Plugin.Log?.LogInfo(
-                                $"[ПОСАДКА-кандидат] {aircraftName} (instanceId={id}) — отменено, " +
-                                "вылет уже завершён другим событием (сбитие/катапультирование)."
-                            );
-                        }
-                    });
                 };
 
                 // ---- Катапультирование (диагностика через сам onEject) ----
@@ -143,6 +111,19 @@ namespace NOStatsLogger
         // катапультирования, БЕЗУСЛОВНО (первым делом ставит aircraft.ejected = true),
         // в отличие от onEject, который вызывается позже и не всегда (см. комментарий
         // у подписки на onEject выше). Поэтому это — надёжный сигнал.
+        //
+        // ВАЖНО: StartEjectionSequence также вызывается ДВИЖКОМ ПРИНУДИТЕЛЬНО из
+        // Player.SetAircraft, когда игрок пересаживается в новый самолёт, пока
+        // старый ещё жив (см. дамп Player.SetAircraft) — это НЕ настоящее
+        // катапультирование игрока, а техническая мера снятия authority со
+        // старого борта. Патч на Player.SetAircraft ниже вызывается ПОСЛЕ этого
+        // принудительного StartEjectionSequence и корректно перезаписывает
+        // результат на "landed", так что порядок EndFlight-вызовов сам всё
+        // разруливает: реальное катапультирование, набранное здесь, будет
+        // перезаписано на landed только если игрок действительно пересел в
+        // другой борт — если же он просто катапультировался и не сел ни в какой
+        // новый самолёт, Player.SetAircraft не вызовется, и результат "ejected"
+        // останется.
         [HarmonyPatch(typeof(Aircraft), nameof(Aircraft.StartEjectionSequence))]
         [HarmonyPostfix]
         private static void Aircraft_StartEjectionSequence_Postfix(Aircraft __instance)
@@ -177,6 +158,66 @@ namespace NOStatsLogger
             }
         }
 
+        // ================== ФРАГИ (через MessageManager.UserCode_TargetCreditMessage) ==================
+        // ВАЖНО: раньше пробовали патчить FactionHQ.RewardPlayer, но он помечен
+        // [Server] и выполняется ТОЛЬКО на хосте. Если ты просто клиент на чужом
+        // сервере — он у тебя вообще не вызывается, поэтому фраги не считались.
+        //
+        // TargetCreditMessage — это [ClientRpc(target = RpcTarget.Player)],
+        // то есть RPC, адресованный конкретно тому клиенту, которому начислена
+        // награда. Он выполняется на твоей машине НЕЗАВИСИМО от того, хост ты
+        // или клиент — именно поэтому патчим его, а не RewardPlayer.
+        //
+        // Как и RewardPlayer, actionType может быть не только Kill (Recon,
+        // Jamming, Supply, Refuel, Repair, RescuePilots, CapturePilots,
+        // CaptureLocation) — фильтруем строго по Kill.
+        [HarmonyPatch(typeof(MessageManager), "UserCode_TargetCreditMessage_106951341")]
+        [HarmonyPostfix]
+        private static void MessageManager_TargetCreditMessage_Postfix(
+            PersistentID killedID,
+            float creditAwarded,
+            FactionHQ.RewardType actionType)
+        {
+            try
+            {
+                var state = FlightState.Current;
+                if (!state.Active)
+                    return;
+
+                Plugin.Log?.LogInfo(
+                    $"[TargetCreditMessage] actionType={actionType} killedID={killedID} creditAwarded={creditAwarded}"
+                );
+
+                if (actionType != FactionHQ.RewardType.Kill)
+                {
+                    // Не фраг (разведка/дозаправка/ремонт/т.д.) — пропускаем.
+                    return;
+                }
+
+                PersistentUnit killedUnit;
+                bool found = UnitRegistry.TryGetPersistentUnit(killedID, out killedUnit);
+
+                if (!found || killedUnit == null || killedUnit.unit == null)
+                {
+                    Plugin.Log?.LogWarning("[TargetCreditMessage] actionType=Kill, но цель не найдена в UnitRegistry — пропускаем.");
+                    return;
+                }
+
+                bool isAirKill = killedUnit.unit is Aircraft;
+
+                Plugin.Log?.LogInfo(
+                    $"[ФРАГ] {(isAirKill ? "ВОЗДУХ" : "ЗЕМЛЯ")}: {killedUnit.unit.unitName} " +
+                    $"(тип цели={killedUnit.unit.GetType().Name})"
+                );
+
+                state.RegisterKill(isAirKill);
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log?.LogError($"[TargetCreditMessage_Postfix] Исключение: {ex}");
+            }
+        }
+
         // ================== СБИТИЕ / ВЫВОД ИЗ СТРОЯ ==================
         [HarmonyPatch(typeof(Aircraft), nameof(Aircraft.UnitDisabled))]
         [HarmonyPostfix]
@@ -200,7 +241,8 @@ namespace NOStatsLogger
                 );
 
                 // newState == true значит самолёт стал disabled (сбит/разбился).
-                // Если вылет уже завершён через посадку/катапультирование — EndFlight ничего не сделает (см. Active flag).
+                // Если вылет уже завершён через посадку/катапультирование/пересадку —
+                // EndFlight ничего не сделает (см. Active flag).
                 if (newState && FlightState.Current.Active && FlightState.Current.TrackedAircraft == __instance)
                 {
                     FlightState.Current.EndFlight(FlightState.ResultShotDown);
@@ -209,6 +251,72 @@ namespace NOStatsLogger
             catch (Exception ex)
             {
                 Plugin.Log?.LogError($"[UnitDisabled_Postfix] Исключение: {ex}");
+            }
+        }
+
+        // ================== ЗАВЕРШЕНИЕ ВЫЛЕТА ПРИ ПЕРЕСАДКЕ В ДРУГОЙ САМОЛЁТ ==================
+        // Player.SetAircraft(aircraft) вызывается каждый раз, когда игрок садится в
+        // новый борт (в том числе — при первом вылете; в этом случае у нас ещё нет
+        // активного FlightState.TrackedAircraft, и патч ничего не делает).
+        //
+        // Если к моменту вызова предыдущий вылет всё ещё Active (то есть не было
+        // ни сбития, ни настоящего катапультирования) — единственное разумное
+        // объяснение: игрок нормально приземлился на предыдущем борту и пересел
+        // в другой (или тот же вернувшийся из ангара) самолёт.
+        //
+        // ВАЖНО: SetAircraft сама вызывает StartEjectionSequence() на СТАРОМ борту
+        // принудительно (см. дамп Player.SetAircraft — это чтобы снять authority),
+        // поэтому наш патч на StartEjectionSequence мог уже успеть отработать и
+        // выставить result=ejected. Этот патч, выполняясь ПОСЛЕ, корректно
+        // перезаписывает результат на landed — так что порядок в коде важен и
+        // работает на нас: EndFlight здесь строго переопределяет предыдущий вызов,
+        // если TrackedAircraft всё ещё указывает на старый (уже отключённый) борт.
+        [HarmonyPatch(typeof(Player), nameof(Player.SetAircraft))]
+        [HarmonyPostfix]
+        private static void Player_SetAircraft_Postfix(Player __instance, Aircraft aircraft)
+        {
+            try
+            {
+                if (__instance == null || !__instance.IsLocalPlayer)
+                    return;
+
+                var state = FlightState.Current;
+
+                // Если TrackedAircraft уже недействителен ИЛИ вылет ещё Active —
+                // считаем, что предыдущий вылет (если это другой самолёт) на самом
+                // деле завершился нормальной посадкой.
+                if (state.TrackedAircraft != null && state.TrackedAircraft != aircraft)
+                {
+                    string prevName = state.AircraftName ?? "Unknown";
+                    string newName = aircraft != null
+                        ? (aircraft.definition != null ? aircraft.definition.unitName : aircraft.name)
+                        : "Unknown";
+
+                    Plugin.Log?.LogInfo(
+                        $"[ПЕРЕСАДКА] {prevName} -> {newName}. " +
+                        (state.Active
+                            ? "Предыдущий вылет считаем нормальной посадкой (result переопределяется на landed)."
+                            : "Предыдущий вылет уже был завершён другим событием.")
+                    );
+
+                    // Принудительно переопределяем результат на landed, даже если
+                    // Active уже false из-за вынужденного StartEjectionSequence
+                    // внутри SetAircraft — поэтому здесь НЕ используем EndFlight
+                    // (он бы просто не сработал из-за Active==false), а меняем
+                    // состояние напрямую.
+                    if (state.Active)
+                    {
+                        state.EndFlight(FlightState.ResultLanded);
+                    }
+                    else
+                    {
+                        state.OverrideResult(FlightState.ResultLanded);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log?.LogError($"[Player_SetAircraft_Postfix] Исключение: {ex}");
             }
         }
     }

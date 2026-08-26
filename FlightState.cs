@@ -25,12 +25,6 @@ namespace NOStatsLogger
 
         public bool Active;
 
-        // Флаг: мы получили OnTouchdown и ждём 0.7с — не окажется ли это на
-        // самом деле сбитием/катапультированием, которые могут прийти чуть позже.
-        // См. комментарий в HookPoints.cs про гонку между OnTouchdown и
-        // onEject/UnitDisabled.
-        public bool PendingLandConfirmation;
-
         public void BeginFlight(Aircraft aircraft)
         {
             if (aircraft == null)
@@ -48,14 +42,12 @@ namespace NOStatsLogger
                 GroundKills = 0,
                 StartedAt = DateTime.UtcNow,
                 Active = true,
-                PendingLandConfirmation = false,
                 Result = ResultLanded
             };
 
             Plugin.Log?.LogInfo($"[FlightState] BEGIN FLIGHT -> {niceName}");
         }
 
-        // Заготовка под фраги — вызывать будем, когда подключим хук FactionHQ.RewardPlayer.
         // isAirKill = true -> воздушный фраг, false -> наземный.
         public void RegisterKill(bool isAirKill)
         {
@@ -84,6 +76,32 @@ namespace NOStatsLogger
                 $"[FlightState] END FLIGHT -> {AircraftName} | " +
                 $"airKills={AirKills} groundKills={GroundKills} " +
                 $"result={Result} duration={durationSeconds}s"
+            );
+        }
+
+        // Меняет Result уже ЗАВЕРШЁННОГО вылета (Active уже false), не трогая
+        // остальные поля. Нужно для случая: Player.SetAircraft принудительно
+        // вызвала StartEjectionSequence на старом борту (сняла authority), из-за
+        // чего наш патч на StartEjectionSequence успел выставить result=ejected —
+        // но раз игрок после этого сел в другой самолёт (а не остался пилотом
+        // без борта), это была на самом деле нормальная посадка, а не настоящее
+        // катапультирование. Использовать ТОЛЬКО из Player_SetAircraft_Postfix.
+        public void OverrideResult(string result)
+        {
+            if (Active)
+            {
+                // Не должно случаться — если вылет ещё активен, нужно звать
+                // EndFlight, а не это. Просто логируем на всякий случай.
+                Plugin.Log?.LogWarning("[FlightState] OverrideResult вызван для ещё активного вылета — проигнорировано.");
+                return;
+            }
+
+            string oldResult = Result;
+            Result = result;
+
+            Plugin.Log?.LogInfo(
+                $"[FlightState] RESULT OVERRIDE -> {AircraftName} | {oldResult} -> {result} " +
+                "(из-за пересадки в другой самолёт сразу после принудительного StartEjectionSequence)."
             );
         }
     }

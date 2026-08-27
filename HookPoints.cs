@@ -8,7 +8,7 @@ namespace NOStatsLogger
     // ВАЖНО: здесь патчатся следующие точки, все подтверждены через dnSpy:
     //   - private void OnStartClient()   -> вылет + точка, где Player уже не null
     //   - public event Action OnTouchdown -> только диагностика (см. комментарий ниже)
-    //   - public void StartEjectionSequence() -> катапультирование (основной источник)
+    //   - public void StartEjectionSequence() -> катапультирование (основной источник, с проверкой IsLanded())
     //   - public event Action onEject     -> катапультирование (диагностика, не основной источник)
     //   - public override void UnitDisabled(bool oldState, bool newState) -> сбитие/разбитие
     //   - MessageManager.UserCode_TargetCreditMessage_106951341 -> фраги (воздух/земля)
@@ -19,6 +19,19 @@ namespace NOStatsLogger
         // Чтобы не подписываться на события Aircraft повторно,
         // если OnStartClient вызовется второй раз на том же объекте.
         private static readonly HashSet<int> hookedInstances = new HashSet<int>();
+
+        // Взводится Prefix-ом на Player.SetAircraft перед вызовом оригинального
+        // метода и означает: "если сейчас сработает StartEjectionSequence — это
+        // ТЕХНИЧЕСКИЙ вызов изнутри SetAircraft (снятие authority со старого
+        // борта при пересадке на новый), а не настоящее катапультирование
+        // игрока". См. дамп Player.SetAircraft:
+        //   if (base.IsServer && this.Aircraft != null) {
+        //       this.RemoveAircraftAuthority(this.Aircraft);
+        //       this.Aircraft.StartEjectionSequence();   // <-- вот этот вызов
+        //   }
+        // Сбрасывается в начале Player_SetAircraft_Postfix, то есть живёт ровно
+        // на время выполнения тела оригинального SetAircraft.
+        private static bool forcedEjectInProgress;
 
         // ================== ВЫЛЕТ (spawn) + подписка на события ==================
         [HarmonyPatch(typeof(Aircraft), "OnStartClient")]
@@ -116,14 +129,13 @@ namespace NOStatsLogger
         // Player.SetAircraft, когда игрок пересаживается в новый самолёт, пока
         // старый ещё жив (см. дамп Player.SetAircraft) — это НЕ настоящее
         // катапультирование игрока, а техническая мера снятия authority со
-        // старого борта. Патч на Player.SetAircraft ниже вызывается ПОСЛЕ этого
-        // принудительного StartEjectionSequence и корректно перезаписывает
-        // результат на "landed", так что порядок EndFlight-вызовов сам всё
-        // разруливает: реальное катапультирование, набранное здесь, будет
-        // перезаписано на landed только если игрок действительно пересел в
-        // другой борт — если же он просто катапультировался и не сел ни в какой
-        // новый самолёт, Player.SetAircraft не вызовется, и результат "ejected"
-        // останется.
+        // старого борта. Раньше мы пытались распознать это постфактум через
+        // Player.SetAircraft-патч, но подтвердилось на практике, что это
+        // ненадёжно (Player.Aircraft не всегда успевает обнулиться одинаково,
+        // из-за чего то срабатывает, то нет). Поэтому теперь используем флаг
+        // forcedEjectInProgress, который взводится ДО вызова оригинального
+        // SetAircraft (см. Player_SetAircraft_Prefix ниже) — если он взведён,
+        // это гарантированно технический вызов, и мы просто не завершаем вылет.
         [HarmonyPatch(typeof(Aircraft), nameof(Aircraft.StartEjectionSequence))]
         [HarmonyPostfix]
         private static void Aircraft_StartEjectionSequence_Postfix(Aircraft __instance)
@@ -144,6 +156,34 @@ namespace NOStatsLogger
                 string aircraftName = __instance.definition != null
                     ? __instance.definition.unitName
                     : __instance.name;
+
+                if (forcedEjectInProgress)
+                {
+                    Plugin.Log?.LogInfo(
+                        $"[КАТАПУЛЬТИРОВАНИЕ-техническое] {aircraftName} (instanceId={__instance.GetInstanceID()}) " +
+                        "— вызвано изнутри Player.SetAircraft при пересадке, НЕ считается реальным катапультированием."
+                    );
+                    return;
+                }
+
+                // ВАЖНО: та же клавиша StartEjectionSequence вызывается и при
+                // экстренном катапультировании в воздухе, И при обычном выходе
+                // из уже приземлившегося самолёта (чтобы пойти к другому борту).
+                // Игра сама различает эти случаи внутри
+                // UserCode_RpcJettisonCanopy через IsLanded(), но
+                // StartEjectionSequence вызывается безусловно в обоих случаях.
+                // Поэтому проверяем IsLanded() сами: если самолёт уже
+                // приземлился (radarAlt<5 && speed<2.5) — это спокойный выход
+                // из кабины, а не настоящее катапультирование.
+                if (__instance.IsLanded())
+                {
+                    Plugin.Log?.LogInfo(
+                        $"[ВЫХОД-ИЗ-КАБИНЫ] {aircraftName} (instanceId={__instance.GetInstanceID()}) " +
+                        "— нажатие катапультирования на земле (IsLanded()==true), считаем нормальным выходом, НЕ катапультированием."
+                    );
+                    state.EndFlight(FlightState.ResultLanded);
+                    return;
+                }
 
                 Plugin.Log?.LogInfo(
                     $"[КАТАПУЛЬТИРОВАНИЕ] {aircraftName} (instanceId={__instance.GetInstanceID()}) " +
@@ -259,18 +299,25 @@ namespace NOStatsLogger
         // новый борт (в том числе — при первом вылете; в этом случае у нас ещё нет
         // активного FlightState.TrackedAircraft, и патч ничего не делает).
         //
-        // Если к моменту вызова предыдущий вылет всё ещё Active (то есть не было
-        // ни сбития, ни настоящего катапультирования) — единственное разумное
-        // объяснение: игрок нормально приземлился на предыдущем борту и пересел
-        // в другой (или тот же вернувшийся из ангара) самолёт.
-        //
-        // ВАЖНО: SetAircraft сама вызывает StartEjectionSequence() на СТАРОМ борту
-        // принудительно (см. дамп Player.SetAircraft — это чтобы снять authority),
-        // поэтому наш патч на StartEjectionSequence мог уже успеть отработать и
-        // выставить result=ejected. Этот патч, выполняясь ПОСЛЕ, корректно
-        // перезаписывает результат на landed — так что порядок в коде важен и
-        // работает на нас: EndFlight здесь строго переопределяет предыдущий вызов,
-        // если TrackedAircraft всё ещё указывает на старый (уже отключённый) борт.
+        // Prefix взводит forcedEjectInProgress ДО выполнения оригинального
+        // SetAircraft — если внутри него вызовется StartEjectionSequence на
+        // старом борту (техническое снятие authority), наш патч на
+        // StartEjectionSequence увидит этот флаг и НЕ завершит вылет как
+        // "ejected" (см. комментарий там). Поэтому к моменту Postfix вылет
+        // либо всё ещё Active (если старый борт просто улетел/приземлился и
+        // ничего фатального не произошло), либо уже был честно завершён
+        // ДРУГИМ событием (сбитие/настоящее катапультирование), случившимся
+        // раньше и НЕ связанным с этим вызовом SetAircraft.
+        [HarmonyPatch(typeof(Player), nameof(Player.SetAircraft))]
+        [HarmonyPrefix]
+        private static void Player_SetAircraft_Prefix(Player __instance)
+        {
+            if (__instance != null && __instance.IsLocalPlayer)
+            {
+                forcedEjectInProgress = true;
+            }
+        }
+
         [HarmonyPatch(typeof(Player), nameof(Player.SetAircraft))]
         [HarmonyPostfix]
         private static void Player_SetAircraft_Postfix(Player __instance, Aircraft aircraft)
@@ -280,12 +327,19 @@ namespace NOStatsLogger
                 if (__instance == null || !__instance.IsLocalPlayer)
                     return;
 
+                // Флаг сделал своё дело на время выполнения оригинального метода —
+                // сбрасываем его сразу, чтобы не зацепить случайный последующий
+                // вызов StartEjectionSequence, не связанный с этим SetAircraft.
+                forcedEjectInProgress = false;
+
                 var state = FlightState.Current;
 
-                // Если TrackedAircraft уже недействителен ИЛИ вылет ещё Active —
-                // считаем, что предыдущий вылет (если это другой самолёт) на самом
-                // деле завершился нормальной посадкой.
-                if (state.TrackedAircraft != null && state.TrackedAircraft != aircraft)
+                // Если TrackedAircraft ещё указывает на предыдущий борт и вылет
+                // всё ещё Active — значит, ничего фатального с ним не произошло
+                // (не сбили, не катапультировался по-настоящему), а игрок просто
+                // пересел в другой самолёт. Значит, предыдущий вылет — обычная
+                // посадка.
+                if (state.Active && state.TrackedAircraft != null && state.TrackedAircraft != aircraft)
                 {
                     string prevName = state.AircraftName ?? "Unknown";
                     string newName = aircraft != null
@@ -293,25 +347,10 @@ namespace NOStatsLogger
                         : "Unknown";
 
                     Plugin.Log?.LogInfo(
-                        $"[ПЕРЕСАДКА] {prevName} -> {newName}. " +
-                        (state.Active
-                            ? "Предыдущий вылет считаем нормальной посадкой (result переопределяется на landed)."
-                            : "Предыдущий вылет уже был завершён другим событием.")
+                        $"[ПЕРЕСАДКА] {prevName} -> {newName}. Предыдущий вылет считаем нормальной посадкой."
                     );
 
-                    // Принудительно переопределяем результат на landed, даже если
-                    // Active уже false из-за вынужденного StartEjectionSequence
-                    // внутри SetAircraft — поэтому здесь НЕ используем EndFlight
-                    // (он бы просто не сработал из-за Active==false), а меняем
-                    // состояние напрямую.
-                    if (state.Active)
-                    {
-                        state.EndFlight(FlightState.ResultLanded);
-                    }
-                    else
-                    {
-                        state.OverrideResult(FlightState.ResultLanded);
-                    }
+                    state.EndFlight(FlightState.ResultLanded);
                 }
             }
             catch (Exception ex)

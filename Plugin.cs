@@ -12,6 +12,7 @@ namespace NOStatsLogger
         private void Awake()
         {
             Log = Logger;
+            StatsStorage.Initialize();
 
             Harmony harmony = new Harmony("NOStatsLogger");
             harmony.PatchAll();

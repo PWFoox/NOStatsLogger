@@ -64,11 +64,13 @@ namespace NOStatsLogger
 
         public void EndFlight(string result)
         {
-            if (!Active)
-                return;
+            if (!Active) return;
 
             Active = false;
             Result = result;
+
+            // Запись вылета в локальный CSV
+            StatsStorage.SaveFlight(this);
 
             int durationSeconds = (int)Math.Max(0, (DateTime.UtcNow - StartedAt).TotalSeconds);
 
@@ -76,32 +78,6 @@ namespace NOStatsLogger
                 $"[FlightState] END FLIGHT -> {AircraftName} | " +
                 $"airKills={AirKills} groundKills={GroundKills} " +
                 $"result={Result} duration={durationSeconds}s"
-            );
-        }
-
-        // Меняет Result уже ЗАВЕРШЁННОГО вылета (Active уже false), не трогая
-        // остальные поля. Нужно для случая: Player.SetAircraft принудительно
-        // вызвала StartEjectionSequence на старом борту (сняла authority), из-за
-        // чего наш патч на StartEjectionSequence успел выставить result=ejected —
-        // но раз игрок после этого сел в другой самолёт (а не остался пилотом
-        // без борта), это была на самом деле нормальная посадка, а не настоящее
-        // катапультирование. Использовать ТОЛЬКО из Player_SetAircraft_Postfix.
-        public void OverrideResult(string result)
-        {
-            if (Active)
-            {
-                // Не должно случаться — если вылет ещё активен, нужно звать
-                // EndFlight, а не это. Просто логируем на всякий случай.
-                Plugin.Log?.LogWarning("[FlightState] OverrideResult вызван для ещё активного вылета — проигнорировано.");
-                return;
-            }
-
-            string oldResult = Result;
-            Result = result;
-
-            Plugin.Log?.LogInfo(
-                $"[FlightState] RESULT OVERRIDE -> {AircraftName} | {oldResult} -> {result} " +
-                "(из-за пересадки в другой самолёт сразу после принудительного StartEjectionSequence)."
             );
         }
     }

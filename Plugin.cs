@@ -4,7 +4,7 @@ using HarmonyLib;
 
 namespace NOStatsLogger
 {
-    [BepInPlugin("NOStatsLogger", "NO Stats Logger", "1.0.0")]
+    [BepInPlugin("NOStatsLogger", "NO Stats Logger", "0.6")]
     public class Plugin : BaseUnityPlugin
     {
         internal static ManualLogSource Log;
@@ -12,12 +12,11 @@ namespace NOStatsLogger
         private void Awake()
         {
             Log = Logger;
-            StatsStorage.Initialize();
 
             Harmony harmony = new Harmony("NOStatsLogger");
             harmony.PatchAll();
 
-            Log.LogInfo("NO Stats: мод загружен. Хуки: OnStartClient, OnTouchdown, onEject, UnitDisabled.");
+            Log.LogInfo("NO Stats: мод успешно загружен.");
         }
     }
 }

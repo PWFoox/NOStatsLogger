@@ -1,173 +1,186 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Text;
 
 namespace NOStatsLogger
 {
-    public class FlightRecord
+    internal struct FlightRecord
     {
-        public string Date;
-        public string Player;
+        public DateTime Timestamp;
         public string Aircraft;
-        public int TotalKills;
-        public int AircraftKills;
-        public int VehicleKills;
-        public int BuildingKills;
-        public int MissileKills;
-        public int ShipKills;
+        public int AirKills;
+        public int GroundKills;
         public string Result;
         public int DurationSeconds;
-        public string Mission;
     }
 
     internal static class StatsStorage
     {
         private static readonly object FileLock = new object();
 
-        private static string LogDirectory => Path.Combine(
-            AppDomain.CurrentDomain.BaseDirectory,
-            "BepInEx",
-            "plugins",
-            "NOStatsLogger",
-            "stats"
-        );
-
-        private static string FlightsFile => Path.Combine(LogDirectory, "flights.csv");
-
-        public static void Initialize()
+        public static string LogDirectory
         {
-            try
+            get
             {
-                Directory.CreateDirectory(LogDirectory);
-                EnsureFlightsHeader();
-            }
-            catch (Exception e)
-            {
-                Plugin.Log?.LogError($"NO Stats: Ошибка инициализации хранилища: {e}");
+                string dir = Path.Combine(
+                    AppDomain.CurrentDomain.BaseDirectory,
+                    "BepInEx",
+                    "plugins",
+                    "NOStatsLogger",
+                    "stats"
+                );
+
+                Directory.CreateDirectory(dir);
+                return dir;
             }
         }
 
-        public static void SaveFlight(FlightState state)
+        private static string FlightsFile => Path.Combine(LogDirectory, "flights.csv");
+
+        private const string Header = "timestamp,aircraft,air_kills,ground_kills,result,duration_seconds";
+
+        public static void SaveFlight(FlightRecord record)
         {
             try
             {
-                string date = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
-                int totalKills = state.AirKills + state.GroundKills;
-                int duration = (int)Math.Max(0, (DateTime.UtcNow - state.StartedAt).TotalSeconds);
-
                 string line = string.Join(",",
-                    Csv(date),
-                    Csv("Player"),
-                    Csv(state.AircraftName ?? "Unknown"),
-                    totalKills.ToString(),
-                    state.AirKills.ToString(),
-                    state.GroundKills.ToString(),
-                    "0", "0", "0",
-                    Csv(state.Result),
-                    duration.ToString(),
-                    Csv("Custom")
+                    Csv(record.Timestamp.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture)),
+                    Csv(record.Aircraft),
+                    record.AirKills.ToString(),
+                    record.GroundKills.ToString(),
+                    Csv(record.Result),
+                    record.DurationSeconds.ToString()
                 );
 
                 lock (FileLock)
                 {
-                    EnsureFlightsHeader();
+                    EnsureHeader();
                     File.AppendAllText(FlightsFile, line + Environment.NewLine, Encoding.UTF8);
                 }
-
-                Plugin.Log?.LogInfo($"NO Stats: Вылет записан на диск -> {state.AircraftName} | Kills={totalKills} | Result={state.Result}");
             }
-            catch (Exception ex)
+            catch (Exception e)
             {
-                Plugin.Log?.LogError($"NO Stats: Ошибка сохранения вылета: {ex}");
+                Plugin.Log?.LogError("NO Stats: ошибка сохранения вылета в CSV: " + e);
             }
         }
 
-        public static List<FlightRecord> LoadAllFlights()
+        public static List<FlightRecord> LoadAll()
         {
-            var list = new List<FlightRecord>();
-            if (!File.Exists(FlightsFile)) return list;
+            var result = new List<FlightRecord>();
 
             try
             {
-                string[] lines;
                 lock (FileLock)
                 {
-                    lines = File.ReadAllLines(FlightsFile, Encoding.UTF8);
-                }
+                    if (!File.Exists(FlightsFile))
+                        return result;
 
-                for (int i = 1; i < lines.Length; i++)
-                {
-                    string line = lines[i].Trim();
-                    if (string.IsNullOrEmpty(line)) continue;
+                    string[] lines = File.ReadAllLines(FlightsFile, Encoding.UTF8);
 
-                    string[] parts = ParseCsvLine(line);
-                    if (parts.Length < 11) continue;
-
-                    var rec = new FlightRecord
+                    for (int i = 1; i < lines.Length; i++)
                     {
-                        Date = parts[0],
-                        Player = parts[1],
-                        Aircraft = parts[2],
-                        TotalKills = int.TryParse(parts[3], out int tk) ? tk : 0,
-                        AircraftKills = int.TryParse(parts[4], out int ak) ? ak : 0,
-                        VehicleKills = int.TryParse(parts[5], out int vk) ? vk : 0,
-                        Result = parts[9],
-                        DurationSeconds = int.TryParse(parts[10], out int ds) ? ds : 0,
-                    };
-                    list.Add(rec);
+                        if (string.IsNullOrWhiteSpace(lines[i]))
+                            continue;
+
+                        string[] fields = ParseCsvLine(lines[i]);
+                        if (fields.Length < 6)
+                            continue;
+
+                        DateTime timestamp;
+                        DateTime.TryParse(fields[0], CultureInfo.InvariantCulture, DateTimeStyles.None, out timestamp);
+
+                        int airKills, groundKills, duration;
+                        int.TryParse(fields[2], out airKills);
+                        int.TryParse(fields[3], out groundKills);
+                        int.TryParse(fields[5], out duration);
+
+                        result.Add(new FlightRecord
+                        {
+                            Timestamp = timestamp,
+                            Aircraft = fields[1],
+                            AirKills = airKills,
+                            GroundKills = groundKills,
+                            Result = fields[4],
+                            DurationSeconds = duration
+                        });
+                    }
                 }
             }
-            catch (Exception ex)
+            catch (Exception e)
             {
-                Plugin.Log?.LogError($"NO Stats: Ошибка загрузки CSV: {ex}");
+                Plugin.Log?.LogError("NO Stats: ошибка чтения flights.csv: " + e);
             }
 
-            return list;
+            return result;
         }
 
-        private static void EnsureFlightsHeader()
+        private static void EnsureHeader()
         {
-            if (File.Exists(FlightsFile)) return;
-            string header = "date,player,aircraft,total_kills,aircraft_kills,vehicle_kills,building_kills,missile_kills,ship_kills,result,duration_seconds,mission" + Environment.NewLine;
-            File.WriteAllText(FlightsFile, header, Encoding.UTF8);
+            if (File.Exists(FlightsFile))
+                return;
+
+            File.WriteAllText(FlightsFile, Header + Environment.NewLine, Encoding.UTF8);
         }
 
-        private static string Csv(string val) => $"\"{val?.Replace("\"", "\"\"")}\"";
+        private static string Csv(string value)
+        {
+            if (value == null)
+                value = "";
+
+            return "\"" + value.Replace("\"", "\"\"") + "\"";
+        }
 
         private static string[] ParseCsvLine(string line)
         {
-            List<string> result = new List<string>();
+            var fields = new List<string>();
+            var sb = new StringBuilder();
             bool inQuotes = false;
-            StringBuilder sb = new StringBuilder();
 
             for (int i = 0; i < line.Length; i++)
             {
                 char c = line[i];
-                if (c == '"')
+
+                if (inQuotes)
                 {
-                    if (inQuotes && i + 1 < line.Length && line[i + 1] == '"')
+                    if (c == '"')
                     {
-                        sb.Append('"');
-                        i++;
+                        if (i + 1 < line.Length && line[i + 1] == '"')
+                        {
+                            sb.Append('"');
+                            i++;
+                        }
+                        else
+                        {
+                            inQuotes = false;
+                        }
                     }
                     else
                     {
-                        inQuotes = !inQuotes;
+                        sb.Append(c);
                     }
-                }
-                else if (c == ',' && !inQuotes)
-                {
-                    result.Add(sb.ToString());
-                    sb.Clear();
                 }
                 else
                 {
-                    sb.Append(c);
+                    if (c == '"')
+                    {
+                        inQuotes = true;
+                    }
+                    else if (c == ',')
+                    {
+                        fields.Add(sb.ToString());
+                        sb.Clear();
+                    }
+                    else
+                    {
+                        sb.Append(c);
+                    }
                 }
             }
-            result.Add(sb.ToString());
-            return result.ToArray();
+            fields.Add(sb.ToString());
+
+            return fields.ToArray();
         }
     }
 }

@@ -256,9 +256,9 @@ namespace NOStatsLogger
             vlg.childForceExpandWidth = true;
             vlg.childForceExpandHeight = false;
 
-            CreateNavButton(sidebar.transform, "overview", "ОБЗОР", font);
-            CreateNavButton(sidebar.transform, "flights", "ПОЛЁТЫ", font);
-            CreateNavButton(sidebar.transform, "aircraft", "ТЕХНИКА", font);
+            CreateNavButton(sidebar.transform, "overview", "OVERVIEW", font);
+            CreateNavButton(sidebar.transform, "flights", "FLIGHTS", font);
+            CreateNavButton(sidebar.transform, "aircraft", "AIRCRAFT", font);
         }
 
         private static void CreateNavButton(Transform parent, string tabId, string label, TMP_FontAsset font)

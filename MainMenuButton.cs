@@ -34,7 +34,6 @@ namespace NOStatsLogger
         private static string activeAircraftFilter = null;
         private static string activeTab = "overview";
 
-        // ---- Общие для нескольких вкладок ----
         private static TMP_Text kpiFlightsVal;
         private static TMP_Text kpiDurationVal;
         private static TMP_Text kpiAirVal;
@@ -43,9 +42,13 @@ namespace NOStatsLogger
         private static TMP_Text kpiSurvivalVal;
         private static TMP_Text kpiAvgTimeVal;
 
-        private static Transform recentContentTransform;   // вкладка "Обзор" — короткий список
-        private static Transform tableContentTransform;     // вкладка "Полёты" — полная таблица
-        private static Transform aircraftTableContent;      // вкладка "Техника" — таблица по самолётам
+        private static TMP_Text rankTitleVal;
+        private static TMP_Text levelVal;
+        private static TMP_Text expProgressVal;
+
+        private static Transform recentContentTransform;
+        private static Transform tableContentTransform;
+        private static Transform aircraftTableContent;
         private static TMP_Text filterLabel;
 
         private static readonly Dictionary<string, GameObject> tabPanels = new Dictionary<string, GameObject>();
@@ -101,8 +104,6 @@ namespace NOStatsLogger
                 Transform overlayLayer = overlayField?.GetValue(mainMenu) as Transform;
 
                 if (overlayLayer == null || GameAssets.i?.settingsMenu == null) return;
-
-                // Не даём открыть второй экземпляр поверх первого.
                 if (overlayLayer.Find("StatsMenu(Clone)") != null) return;
 
                 GameObject statsMenuObj = UnityEngine.Object.Instantiate(GameAssets.i.settingsMenu, overlayLayer);
@@ -128,7 +129,6 @@ namespace NOStatsLogger
                     child.gameObject.SetActive(false);
                 }
 
-                // 1. Полноэкранная тёмная подложка
                 GameObject fullBackdrop = new GameObject("FullBackdrop", typeof(RectTransform), typeof(Image));
                 fullBackdrop.transform.SetParent(statsMenuObj.transform, false);
 
@@ -139,7 +139,6 @@ namespace NOStatsLogger
                 bdRt.offsetMax = new Vector2(1000, 1000);
                 fullBackdrop.GetComponent<Image>().color = new Color(0.05f, 0.07f, 0.10f, 0.98f);
 
-                // 2. Основной макет: Header / Body(Sidebar+Content) / Footer
                 GameObject dashboardRoot = new GameObject("DashboardRoot", typeof(RectTransform), typeof(VerticalLayoutGroup));
                 dashboardRoot.transform.SetParent(statsMenuObj.transform, false);
 
@@ -193,8 +192,6 @@ namespace NOStatsLogger
             txtRt.offsetMax = Vector2.zero;
         }
 
-        // ================== BODY: SIDEBAR + CONTENT ==================
-
         private static void BuildBody(Transform parent, List<FlightRecord> flights, TMP_FontAsset font, GameObject buttonPrefab)
         {
             GameObject body = new GameObject("Body", typeof(RectTransform), typeof(HorizontalLayoutGroup), typeof(LayoutElement));
@@ -213,8 +210,6 @@ namespace NOStatsLogger
 
             BuildSidebar(body.transform, font);
 
-            // Контейнер, в котором панели вкладок лежат друг на друге
-            // (растянуты на весь размер), но активна только одна.
             GameObject contentArea = new GameObject("ContentArea", typeof(RectTransform), typeof(LayoutElement));
             contentArea.transform.SetParent(body.transform, false);
             var caLe = contentArea.GetComponent<LayoutElement>();
@@ -303,8 +298,6 @@ namespace NOStatsLogger
             }
         }
 
-        // ================== ВКЛАДКА: ОБЗОР ==================
-
         private static GameObject BuildOverviewPanel(Transform parent, List<FlightRecord> flights, TMP_FontAsset font)
         {
             GameObject panel = CreatePanel(parent, "OverviewPanel", new Color(0, 0, 0, 0));
@@ -312,6 +305,7 @@ namespace NOStatsLogger
             vlg.padding = new RectOffset(0, 0, 0, 0);
             vlg.spacing = 10;
 
+            BuildProfileCard(panel.transform, font);
             BuildKpiRow(panel.transform, font);
 
             GameObject recentCard = CreatePanel(panel.transform, "RecentCard", BgCardColor);
@@ -337,6 +331,40 @@ namespace NOStatsLogger
             recentCsf.verticalFit = ContentSizeFitter.FitMode.PreferredSize;
 
             return panel;
+        }
+
+        private static void BuildProfileCard(Transform parent, TMP_FontAsset font)
+        {
+            GameObject card = new GameObject("ProfileCard", typeof(RectTransform), typeof(Image), typeof(HorizontalLayoutGroup), typeof(LayoutElement));
+            card.transform.SetParent(parent, false);
+            card.GetComponent<Image>().color = BgCardColor;
+
+            var le = card.GetComponent<LayoutElement>();
+            le.preferredHeight = 45;
+            le.flexibleHeight = 0;
+            le.flexibleWidth = 1;
+
+            var hlg = card.GetComponent<HorizontalLayoutGroup>();
+            hlg.padding = new RectOffset(12, 12, 6, 6);
+            hlg.spacing = 15;
+            hlg.childAlignment = TextAnchor.MiddleCenter;
+            hlg.childControlWidth = true;
+            hlg.childControlHeight = true;
+
+            levelVal = CreateText(card.transform, "LEVEL 1", 15, AccentGreen, font);
+            levelVal.fontStyle = FontStyles.Bold;
+            levelVal.alignment = TextAlignmentOptions.Left;
+            levelVal.gameObject.AddComponent<LayoutElement>().preferredWidth = 90;
+
+            rankTitleVal = CreateText(card.transform, "Cadet", 15, Color.white, font);
+            rankTitleVal.fontStyle = FontStyles.Bold;
+            rankTitleVal.alignment = TextAlignmentOptions.Left;
+            var rankLe = rankTitleVal.gameObject.AddComponent<LayoutElement>();
+            rankLe.flexibleWidth = 1;
+
+            expProgressVal = CreateText(card.transform, "0 / 1000 XP", 12, TextDim, font);
+            expProgressVal.alignment = TextAlignmentOptions.Right;
+            expProgressVal.gameObject.AddComponent<LayoutElement>().preferredWidth = 160;
         }
 
         private static void BuildKpiRow(Transform parent, TMP_FontAsset font)
@@ -389,8 +417,6 @@ namespace NOStatsLogger
 
             return valText;
         }
-
-        // ================== ВКЛАДКА: ПОЛЁТЫ ==================
 
         private static GameObject BuildFlightsPanel(Transform parent, List<FlightRecord> flights, TMP_FontAsset font)
         {
@@ -465,8 +491,6 @@ namespace NOStatsLogger
             return panel;
         }
 
-        // ================== ВКЛАДКА: ТЕХНИКА ==================
-
         private static GameObject BuildAircraftPanel(Transform parent, List<FlightRecord> flights, TMP_FontAsset font)
         {
             GameObject panel = CreatePanel(parent, "AircraftPanel", BgCardColor);
@@ -513,8 +537,6 @@ namespace NOStatsLogger
 
             return panel;
         }
-
-        // ================== ОБЩИЕ ЭЛЕМЕНТЫ ==================
 
         private static void CreateHeaderCell(Transform parent, string text, float width, TMP_FontAsset font, TextAlignmentOptions alignment = TextAlignmentOptions.Left)
         {
@@ -572,6 +594,17 @@ namespace NOStatsLogger
 
         private static void UpdateDashboardData(List<FlightRecord> allFlights, TMP_FontAsset font)
         {
+            ProgressionManager.Load();
+
+            if (levelVal != null) levelVal.text = $"LEVEL {ProgressionManager.CurrentLevel}";
+            if (rankTitleVal != null) rankTitleVal.text = ProgressionManager.GetCurrentRank();
+            if (expProgressVal != null)
+            {
+                long currentExpInLevel = ProgressionManager.TotalExperience - ProgressionManager.ExpForCurrentLevel;
+                long neededExpInLevel = ProgressionManager.ExpForNextLevel;
+                expProgressVal.text = $"{currentExpInLevel} / {neededExpInLevel} XP";
+            }
+
             var filtered = string.IsNullOrEmpty(activeAircraftFilter)
                 ? allFlights
                 : allFlights.Where(f => string.Equals(f.Aircraft, activeAircraftFilter, StringComparison.OrdinalIgnoreCase)).ToList();
@@ -754,7 +787,7 @@ namespace NOStatsLogger
                 {
                     activeAircraftFilter = string.Equals(activeAircraftFilter, acName, StringComparison.OrdinalIgnoreCase) ? null : acName;
                     UpdateDashboardData(StatsStorage.LoadAll(), font);
-                    SwitchTab("flights"); // сразу показываем отфильтрованный список вылетов
+                    SwitchTab("flights");
                 });
             }
         }

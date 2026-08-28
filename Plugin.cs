@@ -4,7 +4,7 @@ using HarmonyLib;
 
 namespace NOStatsLogger
 {
-    [BepInPlugin("NOStatsLogger", "NO Stats Logger", "0.6")]
+    [BepInPlugin("NOStatsLogger", "NO Stats Logger", "0.7")]
     public class Plugin : BaseUnityPlugin
     {
         internal static ManualLogSource Log;
@@ -13,10 +13,12 @@ namespace NOStatsLogger
         {
             Log = Logger;
 
+            ProgressionManager.Load();
+
             Harmony harmony = new Harmony("NOStatsLogger");
             harmony.PatchAll();
 
-            Log.LogInfo("NO Stats: мод успешно загружен.");
+            Log.LogInfo("NO Stats: mod successfully loaded with progression system.");
         }
     }
 }

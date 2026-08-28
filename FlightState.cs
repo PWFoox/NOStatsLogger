@@ -53,7 +53,7 @@ namespace NOStatsLogger
 
             int durationSeconds = (int)Math.Max(0, (DateTime.UtcNow - StartedAt).TotalSeconds);
 
-            StatsStorage.SaveFlight(new FlightRecord
+            var record = new FlightRecord
             {
                 Timestamp = DateTime.Now,
                 Aircraft = AircraftName ?? "Unknown",
@@ -61,7 +61,10 @@ namespace NOStatsLogger
                 GroundKills = GroundKills,
                 Result = Result,
                 DurationSeconds = durationSeconds
-            });
+            };
+
+            StatsStorage.SaveFlight(record);
+            ProgressionManager.AddExperienceFromFlight(record);
         }
     }
 }

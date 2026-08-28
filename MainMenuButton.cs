@@ -1,9 +1,6 @@
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
-using System.IO;
 using System.Linq;
-using System.Text;
 using HarmonyLib;
 using TMPro;
 using UnityEngine;
@@ -19,11 +16,14 @@ namespace NOStatsLogger
             public int Flights { get; set; }
             public int AirKills { get; set; }
             public int GroundKills { get; set; }
-            public int Losses { get; set; }
+            public int Landed { get; set; }
+            public int Ejected { get; set; }
+            public int ShotDown { get; set; }
             public long DurationSeconds { get; set; }
         }
 
         private static readonly Color BgCardColor = new Color(0.10f, 0.14f, 0.18f, 0.95f);
+        private static readonly Color BgSidebarColor = new Color(0.07f, 0.10f, 0.13f, 0.98f);
         private static readonly Color BgButtonNormal = new Color(0.14f, 0.19f, 0.25f, 0.85f);
         private static readonly Color BgButtonActive = new Color(0.00f, 0.45f, 0.38f, 0.95f);
         private static readonly Color AccentGreen = new Color(0.00f, 1.00f, 0.78f);
@@ -32,7 +32,9 @@ namespace NOStatsLogger
         private static readonly Color TextDim = new Color(0.65f, 0.72f, 0.80f);
 
         private static string activeAircraftFilter = null;
+        private static string activeTab = "overview";
 
+        // ---- Общие для нескольких вкладок ----
         private static TMP_Text kpiFlightsVal;
         private static TMP_Text kpiDurationVal;
         private static TMP_Text kpiAirVal;
@@ -41,9 +43,13 @@ namespace NOStatsLogger
         private static TMP_Text kpiSurvivalVal;
         private static TMP_Text kpiAvgTimeVal;
 
-        private static Transform tableContentTransform;
+        private static Transform recentContentTransform;   // вкладка "Обзор" — короткий список
+        private static Transform tableContentTransform;     // вкладка "Полёты" — полная таблица
+        private static Transform aircraftTableContent;      // вкладка "Техника" — таблица по самолётам
         private static TMP_Text filterLabel;
-        private static readonly Dictionary<string, Image> aircraftBtnImages = new Dictionary<string, Image>(StringComparer.OrdinalIgnoreCase);
+
+        private static readonly Dictionary<string, GameObject> tabPanels = new Dictionary<string, GameObject>();
+        private static readonly Dictionary<string, Image> navButtonImages = new Dictionary<string, Image>();
 
         [HarmonyPatch(typeof(MainMenu), "Awake")]
         [HarmonyPostfix]
@@ -87,12 +93,17 @@ namespace NOStatsLogger
             try
             {
                 activeAircraftFilter = null;
-                aircraftBtnImages.Clear();
+                activeTab = "overview";
+                navButtonImages.Clear();
+                tabPanels.Clear();
 
                 var overlayField = typeof(MainMenu).GetField("overlayMenuLayer", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
                 Transform overlayLayer = overlayField?.GetValue(mainMenu) as Transform;
 
                 if (overlayLayer == null || GameAssets.i?.settingsMenu == null) return;
+
+                // Не даём открыть второй экземпляр поверх первого.
+                if (overlayLayer.Find("StatsMenu(Clone)") != null) return;
 
                 GameObject statsMenuObj = UnityEngine.Object.Instantiate(GameAssets.i.settingsMenu, overlayLayer);
                 statsMenuObj.name = "StatsMenu(Clone)";
@@ -117,10 +128,10 @@ namespace NOStatsLogger
                     child.gameObject.SetActive(false);
                 }
 
-                // 1. Полноэкранная темная подложка
+                // 1. Полноэкранная тёмная подложка
                 GameObject fullBackdrop = new GameObject("FullBackdrop", typeof(RectTransform), typeof(Image));
                 fullBackdrop.transform.SetParent(statsMenuObj.transform, false);
-                
+
                 RectTransform bdRt = fullBackdrop.GetComponent<RectTransform>();
                 bdRt.anchorMin = Vector2.zero;
                 bdRt.anchorMax = Vector2.one;
@@ -128,7 +139,7 @@ namespace NOStatsLogger
                 bdRt.offsetMax = new Vector2(1000, 1000);
                 fullBackdrop.GetComponent<Image>().color = new Color(0.05f, 0.07f, 0.10f, 0.98f);
 
-                // 2. Основной макет
+                // 2. Основной макет: Header / Body(Sidebar+Content) / Footer
                 GameObject dashboardRoot = new GameObject("DashboardRoot", typeof(RectTransform), typeof(VerticalLayoutGroup));
                 dashboardRoot.transform.SetParent(statsMenuObj.transform, false);
 
@@ -148,11 +159,11 @@ namespace NOStatsLogger
                 List<FlightRecord> flights = StatsStorage.LoadAll();
 
                 BuildHeaderRow(dashboardRoot.transform, font);
-                BuildKpiRow(dashboardRoot.transform, font);
-                BuildMainGrid(dashboardRoot.transform, flights, font);
+                BuildBody(dashboardRoot.transform, flights, font, buttonPrefab);
                 BuildFooter(dashboardRoot.transform, statsMenuObj, buttonPrefab);
 
-                UpdateDashboardData(flights);
+                UpdateDashboardData(flights, font);
+                SwitchTab("overview");
             }
             catch (Exception ex)
             {
@@ -180,6 +191,152 @@ namespace NOStatsLogger
             txtRt.anchorMax = Vector2.one;
             txtRt.offsetMin = Vector2.zero;
             txtRt.offsetMax = Vector2.zero;
+        }
+
+        // ================== BODY: SIDEBAR + CONTENT ==================
+
+        private static void BuildBody(Transform parent, List<FlightRecord> flights, TMP_FontAsset font, GameObject buttonPrefab)
+        {
+            GameObject body = new GameObject("Body", typeof(RectTransform), typeof(HorizontalLayoutGroup), typeof(LayoutElement));
+            body.transform.SetParent(parent, false);
+
+            var bodyLe = body.GetComponent<LayoutElement>();
+            bodyLe.flexibleHeight = 1;
+            bodyLe.flexibleWidth = 1;
+
+            var bodyHlg = body.GetComponent<HorizontalLayoutGroup>();
+            bodyHlg.spacing = 10;
+            bodyHlg.childControlWidth = true;
+            bodyHlg.childControlHeight = true;
+            bodyHlg.childForceExpandWidth = false;
+            bodyHlg.childForceExpandHeight = true;
+
+            BuildSidebar(body.transform, font);
+
+            // Контейнер, в котором панели вкладок лежат друг на друге
+            // (растянуты на весь размер), но активна только одна.
+            GameObject contentArea = new GameObject("ContentArea", typeof(RectTransform), typeof(LayoutElement));
+            contentArea.transform.SetParent(body.transform, false);
+            var caLe = contentArea.GetComponent<LayoutElement>();
+            caLe.flexibleWidth = 1;
+            caLe.flexibleHeight = 1;
+
+            tabPanels["overview"] = BuildOverviewPanel(contentArea.transform, flights, font);
+            tabPanels["flights"] = BuildFlightsPanel(contentArea.transform, flights, font);
+            tabPanels["aircraft"] = BuildAircraftPanel(contentArea.transform, flights, font);
+
+            foreach (var panel in tabPanels.Values)
+            {
+                RectTransform rt = panel.GetComponent<RectTransform>();
+                rt.anchorMin = Vector2.zero;
+                rt.anchorMax = Vector2.one;
+                rt.offsetMin = Vector2.zero;
+                rt.offsetMax = Vector2.zero;
+            }
+        }
+
+        private static void BuildSidebar(Transform parent, TMP_FontAsset font)
+        {
+            GameObject sidebar = new GameObject("Sidebar", typeof(RectTransform), typeof(Image), typeof(VerticalLayoutGroup), typeof(LayoutElement));
+            sidebar.transform.SetParent(parent, false);
+            sidebar.GetComponent<Image>().color = BgSidebarColor;
+
+            var le = sidebar.GetComponent<LayoutElement>();
+            le.preferredWidth = 150;
+            le.minWidth = 150;
+            le.flexibleWidth = 0;
+            le.flexibleHeight = 1;
+
+            var vlg = sidebar.GetComponent<VerticalLayoutGroup>();
+            vlg.padding = new RectOffset(6, 6, 10, 10);
+            vlg.spacing = 4;
+            vlg.childAlignment = TextAnchor.UpperCenter;
+            vlg.childControlWidth = true;
+            vlg.childControlHeight = true;
+            vlg.childForceExpandWidth = true;
+            vlg.childForceExpandHeight = false;
+
+            CreateNavButton(sidebar.transform, "overview", "ОБЗОР", font);
+            CreateNavButton(sidebar.transform, "flights", "ПОЛЁТЫ", font);
+            CreateNavButton(sidebar.transform, "aircraft", "ТЕХНИКА", font);
+        }
+
+        private static void CreateNavButton(Transform parent, string tabId, string label, TMP_FontAsset font)
+        {
+            GameObject btnObj = new GameObject($"Nav_{tabId}", typeof(RectTransform), typeof(Image), typeof(Button), typeof(LayoutElement));
+            btnObj.transform.SetParent(parent, false);
+
+            var le = btnObj.GetComponent<LayoutElement>();
+            le.preferredHeight = 34;
+            le.flexibleHeight = 0;
+            le.flexibleWidth = 1;
+
+            var img = btnObj.GetComponent<Image>();
+            img.color = BgButtonNormal;
+            navButtonImages[tabId] = img;
+
+            TMP_Text txt = CreateText(btnObj.transform, label, 12, Color.white, font);
+            txt.alignment = TextAlignmentOptions.Center;
+            txt.fontStyle = FontStyles.Bold;
+            RectTransform txtRt = txt.GetComponent<RectTransform>();
+            txtRt.anchorMin = Vector2.zero;
+            txtRt.anchorMax = Vector2.one;
+            txtRt.offsetMin = Vector2.zero;
+            txtRt.offsetMax = Vector2.zero;
+
+            var btn = btnObj.GetComponent<Button>();
+            btn.onClick.AddListener(() => SwitchTab(tabId));
+        }
+
+        private static void SwitchTab(string tabId)
+        {
+            activeTab = tabId;
+
+            foreach (var kvp in tabPanels)
+            {
+                kvp.Value.SetActive(kvp.Key == tabId);
+            }
+
+            foreach (var kvp in navButtonImages)
+            {
+                kvp.Value.color = kvp.Key == tabId ? BgButtonActive : BgButtonNormal;
+            }
+        }
+
+        // ================== ВКЛАДКА: ОБЗОР ==================
+
+        private static GameObject BuildOverviewPanel(Transform parent, List<FlightRecord> flights, TMP_FontAsset font)
+        {
+            GameObject panel = CreatePanel(parent, "OverviewPanel", new Color(0, 0, 0, 0));
+            var vlg = panel.GetComponent<VerticalLayoutGroup>();
+            vlg.padding = new RectOffset(0, 0, 0, 0);
+            vlg.spacing = 10;
+
+            BuildKpiRow(panel.transform, font);
+
+            GameObject recentCard = CreatePanel(panel.transform, "RecentCard", BgCardColor);
+            var recentLe = recentCard.GetComponent<LayoutElement>() ?? recentCard.AddComponent<LayoutElement>();
+            recentLe.flexibleHeight = 1;
+            recentLe.flexibleWidth = 1;
+
+            TMP_Text recentTitle = CreateText(recentCard.transform, "RECENT FLIGHTS", 13, Color.white, font);
+            recentTitle.fontStyle = FontStyles.Bold;
+            var rtLe = recentTitle.gameObject.AddComponent<LayoutElement>();
+            rtLe.preferredHeight = 20;
+            rtLe.flexibleHeight = 0;
+
+            GameObject recentScroll = CreateScrollView(recentCard.transform, "RecentScrollView", out recentContentTransform);
+            var recentVlg = recentContentTransform.gameObject.AddComponent<VerticalLayoutGroup>();
+            recentVlg.spacing = 4;
+            recentVlg.childControlWidth = true;
+            recentVlg.childControlHeight = true;
+            recentVlg.childForceExpandWidth = true;
+            recentVlg.childForceExpandHeight = false;
+
+            var recentCsf = recentContentTransform.gameObject.AddComponent<ContentSizeFitter>();
+            recentCsf.verticalFit = ContentSizeFitter.FitMode.PreferredSize;
+
+            return panel;
         }
 
         private static void BuildKpiRow(Transform parent, TMP_FontAsset font)
@@ -233,51 +390,33 @@ namespace NOStatsLogger
             return valText;
         }
 
-        private static void BuildMainGrid(Transform parent, List<FlightRecord> flights, TMP_FontAsset font)
+        // ================== ВКЛАДКА: ПОЛЁТЫ ==================
+
+        private static GameObject BuildFlightsPanel(Transform parent, List<FlightRecord> flights, TMP_FontAsset font)
         {
-            GameObject grid = new GameObject("MainGrid", typeof(RectTransform), typeof(HorizontalLayoutGroup), typeof(LayoutElement));
-            grid.transform.SetParent(parent, false);
+            GameObject panel = CreatePanel(parent, "FlightsPanel", BgCardColor);
 
-            var le = grid.GetComponent<LayoutElement>();
-            le.flexibleHeight = 1;
-            le.flexibleWidth = 1;
+            GameObject header = new GameObject("FlightsHeader", typeof(RectTransform), typeof(HorizontalLayoutGroup), typeof(LayoutElement));
+            header.transform.SetParent(panel.transform, false);
 
-            var hlg = grid.GetComponent<HorizontalLayoutGroup>();
-            hlg.spacing = 10;
-            hlg.childControlWidth = true;
-            hlg.childControlHeight = true;
-            hlg.childForceExpandWidth = false;
-            hlg.childForceExpandHeight = true;
+            var hLe = header.GetComponent<LayoutElement>();
+            hLe.preferredHeight = 24;
+            hLe.flexibleHeight = 0;
+            hLe.flexibleWidth = 1;
 
-            // --- Левая колонка (История вылетов) ---
-            GameObject leftCol = CreatePanel(grid.transform, "LeftColumn", BgCardColor);
-            var leftLe = leftCol.GetComponent<LayoutElement>();
-            leftLe.preferredWidth = 0;
-            leftLe.minWidth = 0;
-            leftLe.flexibleWidth = 0.67f;
+            var hHlg = header.GetComponent<HorizontalLayoutGroup>();
+            hHlg.spacing = 10;
+            hHlg.childControlWidth = true;
+            hHlg.childControlHeight = true;
+            hHlg.childForceExpandWidth = false;
+            hHlg.childForceExpandHeight = true;
 
-            // Шапка левой колонки (Название + Фильтр)
-            GameObject leftHeader = new GameObject("LeftHeader", typeof(RectTransform), typeof(HorizontalLayoutGroup), typeof(LayoutElement));
-            leftHeader.transform.SetParent(leftCol.transform, false);
-
-            var lhLe = leftHeader.GetComponent<LayoutElement>();
-            lhLe.preferredHeight = 24;
-            lhLe.flexibleHeight = 0;
-            lhLe.flexibleWidth = 1;
-
-            var lhHlg = leftHeader.GetComponent<HorizontalLayoutGroup>();
-            lhHlg.spacing = 10;
-            lhHlg.childControlWidth = true;
-            lhHlg.childControlHeight = true;
-            lhHlg.childForceExpandWidth = false;
-            lhHlg.childForceExpandHeight = true;
-
-            TMP_Text leftTitle = CreateText(leftHeader.transform, "FLIGHT LOGS HISTORY", 14, Color.white, font);
-            leftTitle.fontStyle = FontStyles.Bold;
-            var titleLe = leftTitle.gameObject.AddComponent<LayoutElement>();
+            TMP_Text title = CreateText(header.transform, "FLIGHT LOGS HISTORY", 14, Color.white, font);
+            title.fontStyle = FontStyles.Bold;
+            var titleLe = title.gameObject.AddComponent<LayoutElement>();
             titleLe.flexibleWidth = 0;
 
-            filterLabel = CreateText(leftHeader.transform, "", 12, AccentGreen, font);
+            filterLabel = CreateText(header.transform, "", 12, AccentGreen, font);
             filterLabel.alignment = TextAlignmentOptions.Right;
 
             var flLe = filterLabel.gameObject.AddComponent<LayoutElement>();
@@ -287,12 +426,11 @@ namespace NOStatsLogger
             filterBtn.onClick.AddListener(() =>
             {
                 activeAircraftFilter = null;
-                UpdateDashboardData(flights);
+                UpdateDashboardData(StatsStorage.LoadAll(), font);
             });
 
-            // Статичная шапка таблицы с жесткими пиксельными размерами
             GameObject tableHeaderObj = new GameObject("TableHeader", typeof(RectTransform), typeof(HorizontalLayoutGroup), typeof(LayoutElement));
-            tableHeaderObj.transform.SetParent(leftCol.transform, false);
+            tableHeaderObj.transform.SetParent(panel.transform, false);
             var thLe = tableHeaderObj.AddComponent<LayoutElement>();
             thLe.preferredHeight = 26;
             thLe.flexibleHeight = 0;
@@ -302,7 +440,7 @@ namespace NOStatsLogger
             thHlg.spacing = 6;
             thHlg.childControlWidth = true;
             thHlg.childControlHeight = true;
-            thHlg.childForceExpandWidth = false; // Строго по пикселям
+            thHlg.childForceExpandWidth = false;
             thHlg.padding = new RectOffset(8, 8, 0, 0);
 
             CreateHeaderCell(tableHeaderObj.transform, "DATE", 115, font);
@@ -312,8 +450,7 @@ namespace NOStatsLogger
             CreateHeaderCell(tableHeaderObj.transform, "RESULT", 95, font);
             CreateHeaderCell(tableHeaderObj.transform, "TIME", 60, font, TextAlignmentOptions.Right);
 
-            // ScrollView для строк таблицы
-            GameObject tableScrollView = CreateScrollView(leftCol.transform, "TableScrollView", out tableContentTransform);
+            GameObject tableScrollView = CreateScrollView(panel.transform, "TableScrollView", out tableContentTransform);
 
             var tableVlg = tableContentTransform.gameObject.AddComponent<VerticalLayoutGroup>();
             tableVlg.spacing = 4;
@@ -325,103 +462,59 @@ namespace NOStatsLogger
             var tableCsf = tableContentTransform.gameObject.AddComponent<ContentSizeFitter>();
             tableCsf.verticalFit = ContentSizeFitter.FitMode.PreferredSize;
 
-            // --- Правая колонка (Список техники) ---
-            GameObject rightCol = CreatePanel(grid.transform, "RightColumn", BgCardColor);
-            var rightLe = rightCol.GetComponent<LayoutElement>();
-            rightLe.preferredWidth = 0;
-            rightLe.minWidth = 0;
-            rightLe.flexibleWidth = 0.33f;
-
-            GameObject rightHeader = new GameObject("RightHeader", typeof(RectTransform), typeof(LayoutElement));
-            rightHeader.transform.SetParent(rightCol.transform, false);
-            var rhLe = rightHeader.GetComponent<LayoutElement>();
-            rhLe.preferredHeight = 24;
-            rhLe.flexibleHeight = 0;
-            rhLe.flexibleWidth = 1;
-
-            TMP_Text rightTitle = CreateText(rightHeader.transform, "AIRCRAFT FLEET (CLICK TO FILTER)", 13, Color.white, font);
-            rightTitle.fontStyle = FontStyles.Bold;
-
-            GameObject acScrollView = CreateScrollView(rightCol.transform, "AcScrollView", out Transform acContent);
-
-            var acVlg = acContent.gameObject.AddComponent<VerticalLayoutGroup>();
-            acVlg.spacing = 6;
-            acVlg.childControlWidth = true;
-            acVlg.childControlHeight = true;
-            acVlg.childForceExpandWidth = true;
-            acVlg.childForceExpandHeight = false;
-
-            var acCsf = acContent.gameObject.AddComponent<ContentSizeFitter>();
-            acCsf.verticalFit = ContentSizeFitter.FitMode.PreferredSize;
-
-            var byAircraft = new Dictionary<string, AircraftStats>(StringComparer.OrdinalIgnoreCase);
-            foreach (var f in flights)
-            {
-                string ac = string.IsNullOrEmpty(f.Aircraft) ? "Unknown" : f.Aircraft;
-                if (!byAircraft.TryGetValue(ac, out var stats))
-                {
-                    stats = new AircraftStats();
-                    byAircraft[ac] = stats;
-                }
-                stats.Flights++;
-                stats.AirKills += f.AirKills;
-                stats.GroundKills += f.GroundKills;
-                stats.DurationSeconds += f.DurationSeconds;
-                if (f.Result == FlightState.ResultShotDown) stats.Losses++;
-            }
-
-            var sortedAircraft = byAircraft
-                .OrderByDescending(kvp => kvp.Value.Flights)
-                .ThenByDescending(kvp => kvp.Value.AirKills + kvp.Value.GroundKills);
-
-            foreach (var kvp in sortedAircraft)
-            {
-                string acName = kvp.Key;
-                var stats = kvp.Value;
-
-                GameObject acBtnObj = new GameObject($"Item_{acName}", typeof(RectTransform), typeof(Image), typeof(Button), typeof(VerticalLayoutGroup), typeof(LayoutElement));
-                acBtnObj.transform.SetParent(acContent, false);
-
-                var btnLe = acBtnObj.GetComponent<LayoutElement>();
-                btnLe.preferredHeight = 46;
-                btnLe.minHeight = 46;
-                btnLe.preferredWidth = 0;
-                btnLe.flexibleHeight = 0;
-                btnLe.flexibleWidth = 1;
-
-                var img = acBtnObj.GetComponent<Image>();
-                img.color = BgButtonNormal;
-                aircraftBtnImages[acName] = img;
-
-                var btn = acBtnObj.GetComponent<Button>();
-
-                var itemVlg = acBtnObj.GetComponent<VerticalLayoutGroup>();
-                itemVlg.padding = new RectOffset(8, 8, 4, 4);
-                itemVlg.spacing = 1;
-                itemVlg.childControlWidth = true;
-                itemVlg.childControlHeight = true;
-                itemVlg.childForceExpandWidth = true;
-
-                int maxF = Math.Max(1, flights.Count);
-                int pct = (stats.Flights * 100) / maxF;
-                int bars = Math.Max(1, pct / 10);
-
-                string filled = new string('=', bars);
-                string empty = new string('-', 10 - bars);
-                string barStr = $"[<color=#00FFC8>{filled}</color><color=#2A3744>{empty}</color>]";
-
-                TMP_Text acInfoText = CreateText(acBtnObj.transform, "", 11, Color.white, font);
-                acInfoText.richText = true;
-                acInfoText.text = $"<b><color=#00FFC8>{acName}</color></b> <color=#8A99AD>({stats.Flights} flights)</color>\n" +
-                                  $"{barStr} Kills: {stats.AirKills + stats.GroundKills}";
-
-                btn.onClick.AddListener(() =>
-                {
-                    activeAircraftFilter = string.Equals(activeAircraftFilter, acName, StringComparison.OrdinalIgnoreCase) ? null : acName;
-                    UpdateDashboardData(flights);
-                });
-            }
+            return panel;
         }
+
+        // ================== ВКЛАДКА: ТЕХНИКА ==================
+
+        private static GameObject BuildAircraftPanel(Transform parent, List<FlightRecord> flights, TMP_FontAsset font)
+        {
+            GameObject panel = CreatePanel(parent, "AircraftPanel", BgCardColor);
+
+            TMP_Text title = CreateText(panel.transform, "AIRCRAFT FLEET STATISTICS", 14, Color.white, font);
+            title.fontStyle = FontStyles.Bold;
+            var titleLe = title.gameObject.AddComponent<LayoutElement>();
+            titleLe.preferredHeight = 24;
+            titleLe.flexibleHeight = 0;
+
+            GameObject tableHeaderObj = new GameObject("AcTableHeader", typeof(RectTransform), typeof(HorizontalLayoutGroup), typeof(LayoutElement));
+            tableHeaderObj.transform.SetParent(panel.transform, false);
+            var thLe = tableHeaderObj.AddComponent<LayoutElement>();
+            thLe.preferredHeight = 26;
+            thLe.flexibleHeight = 0;
+            thLe.flexibleWidth = 1;
+
+            var thHlg = tableHeaderObj.GetComponent<HorizontalLayoutGroup>();
+            thHlg.spacing = 6;
+            thHlg.childControlWidth = true;
+            thHlg.childControlHeight = true;
+            thHlg.childForceExpandWidth = false;
+            thHlg.padding = new RectOffset(8, 8, 0, 0);
+
+            CreateHeaderCell(tableHeaderObj.transform, "AIRCRAFT", 170, font);
+            CreateHeaderCell(tableHeaderObj.transform, "FLIGHTS", 60, font, TextAlignmentOptions.Center);
+            CreateHeaderCell(tableHeaderObj.transform, "AIR", 45, font, TextAlignmentOptions.Center);
+            CreateHeaderCell(tableHeaderObj.transform, "GND", 45, font, TextAlignmentOptions.Center);
+            CreateHeaderCell(tableHeaderObj.transform, "K/D", 55, font, TextAlignmentOptions.Center);
+            CreateHeaderCell(tableHeaderObj.transform, "AVG TIME", 70, font, TextAlignmentOptions.Center);
+            CreateHeaderCell(tableHeaderObj.transform, "LAND/EJ/DOWN", 110, font, TextAlignmentOptions.Right);
+
+            GameObject scrollView = CreateScrollView(panel.transform, "AcTableScrollView", out aircraftTableContent);
+
+            var vlg2 = aircraftTableContent.gameObject.AddComponent<VerticalLayoutGroup>();
+            vlg2.spacing = 4;
+            vlg2.childControlWidth = true;
+            vlg2.childControlHeight = true;
+            vlg2.childForceExpandWidth = true;
+            vlg2.childForceExpandHeight = false;
+
+            var csf2 = aircraftTableContent.gameObject.AddComponent<ContentSizeFitter>();
+            csf2.verticalFit = ContentSizeFitter.FitMode.PreferredSize;
+
+            return panel;
+        }
+
+        // ================== ОБЩИЕ ЭЛЕМЕНТЫ ==================
 
         private static void CreateHeaderCell(Transform parent, string text, float width, TMP_FontAsset font, TextAlignmentOptions alignment = TextAlignmentOptions.Left)
         {
@@ -477,7 +570,7 @@ namespace NOStatsLogger
             return scrollObj;
         }
 
-        private static void UpdateDashboardData(List<FlightRecord> allFlights)
+        private static void UpdateDashboardData(List<FlightRecord> allFlights, TMP_FontAsset font)
         {
             var filtered = string.IsNullOrEmpty(activeAircraftFilter)
                 ? allFlights
@@ -506,7 +599,7 @@ namespace NOStatsLogger
 
             if (kpiFlightsVal != null) kpiFlightsVal.text = totalFlights.ToString();
             if (kpiDurationVal != null) kpiDurationVal.text = $"{(int)totalTime.TotalHours}h {totalTime.Minutes}m";
-            if (kpiAvgTimeVal != null) kpiAvgTimeVal.text = $"{avgTime.Minutes}m {avgTime.Seconds}s";
+            if (kpiAvgTimeVal != null) kpiAvgTimeVal.text = $"{(int)avgTime.TotalHours}h {avgTime.Minutes}m {avgTime.Seconds}s";
             if (kpiAirVal != null) kpiAirVal.text = airKills.ToString();
             if (kpiGroundVal != null) kpiGroundVal.text = groundKills.ToString();
             if (kpiKdVal != null) kpiKdVal.text = kd.ToString("F2");
@@ -519,61 +612,150 @@ namespace NOStatsLogger
                     : $"FILTER: <color=#00FFC8><b>{activeAircraftFilter}</b></color> <color=#FF5555>[RESET]</color>";
             }
 
-            if (tableContentTransform != null)
+            RebuildFlightRows(tableContentTransform, filtered, showAll: true);
+            RebuildFlightRows(recentContentTransform, filtered, showAll: false, maxRows: 8);
+            RebuildAircraftTable(allFlights, font);
+        }
+
+        private static void RebuildFlightRows(Transform container, List<FlightRecord> filtered, bool showAll, int maxRows = int.MaxValue)
+        {
+            if (container == null)
+                return;
+
+            foreach (Transform child in container)
             {
-                foreach (Transform child in tableContentTransform)
-                {
-                    UnityEngine.Object.Destroy(child.gameObject);
-                }
-
-                if (filtered.Count == 0)
-                {
-                    TMP_Text emptyTxt = CreateText(tableContentTransform, "No flight records found for this aircraft.", 12, TextDim, font: null);
-                    emptyTxt.gameObject.AddComponent<LayoutElement>().preferredHeight = 30;
-                }
-                else
-                {
-                    for (int i = filtered.Count - 1; i >= 0; i--)
-                    {
-                        var f = filtered[i];
-                        GameObject rowObj = new GameObject($"Row_{i}", typeof(RectTransform), typeof(HorizontalLayoutGroup), typeof(LayoutElement), typeof(Image));
-                        rowObj.transform.SetParent(tableContentTransform, false);
-                        
-                        var rowImg = rowObj.GetComponent<Image>();
-                        rowImg.color = new Color(0.12f, 0.16f, 0.22f, 0.6f);
-
-                        var rowLe = rowObj.GetComponent<LayoutElement>();
-                        rowLe.preferredHeight = 28;
-                        rowLe.flexibleWidth = 1;
-
-                        var rowHlg = rowObj.GetComponent<HorizontalLayoutGroup>();
-                        rowHlg.spacing = 6;
-                        rowHlg.childControlWidth = true;
-                        rowHlg.childControlHeight = true;
-                        rowHlg.childForceExpandWidth = false; // Строго по пикселям шапки
-                        rowHlg.padding = new RectOffset(8, 8, 2, 2);
-
-                        CreateTableCell(rowObj.transform, $"{f.Timestamp:HH:mm dd/MM}", 115, Color.white, false);
-                        CreateTableCell(rowObj.transform, Truncate(f.Aircraft, 16), 155, Color.white, true);
-                        CreateTableCell(rowObj.transform, f.AirKills.ToString(), 45, Color.white, false, TextAlignmentOptions.Center);
-                        CreateTableCell(rowObj.transform, f.GroundKills.ToString(), 45, Color.white, false, TextAlignmentOptions.Center);
-
-                        string statusColor = f.Result == FlightState.ResultLanded ? "#00FFC8" :
-                                             f.Result == FlightState.ResultEjected ? "#FFB833" : "#FF5555";
-                        string statusText = f.Result == FlightState.ResultLanded ? "LANDED" :
-                                            f.Result == FlightState.ResultEjected ? "EJECTED" : "SHOT DOWN";
-                        CreateTableCell(rowObj.transform, $"<color={statusColor}><b>{statusText}</b></color>", 95, Color.white, false);
-
-                        TimeSpan dur = TimeSpan.FromSeconds(f.DurationSeconds);
-                        CreateTableCell(rowObj.transform, $"{dur.Minutes}m {dur.Seconds}s", 60, TextDim, false, TextAlignmentOptions.Right);
-                    }
-                }
+                UnityEngine.Object.Destroy(child.gameObject);
             }
 
-            foreach (var kvp in aircraftBtnImages)
+            if (filtered.Count == 0)
             {
-                bool isSelected = string.Equals(kvp.Key, activeAircraftFilter, StringComparison.OrdinalIgnoreCase);
-                kvp.Value.color = isSelected ? BgButtonActive : BgButtonNormal;
+                TMP_Text emptyTxt = CreateText(container, "No flight records found.", 12, TextDim, font: null);
+                emptyTxt.gameObject.AddComponent<LayoutElement>().preferredHeight = 30;
+                return;
+            }
+
+            int shown = 0;
+            for (int i = filtered.Count - 1; i >= 0 && shown < maxRows; i--, shown++)
+            {
+                var f = filtered[i];
+                GameObject rowObj = new GameObject($"Row_{i}", typeof(RectTransform), typeof(HorizontalLayoutGroup), typeof(LayoutElement), typeof(Image));
+                rowObj.transform.SetParent(container, false);
+
+                var rowImg = rowObj.GetComponent<Image>();
+                rowImg.color = new Color(0.12f, 0.16f, 0.22f, 0.6f);
+
+                var rowLe = rowObj.GetComponent<LayoutElement>();
+                rowLe.preferredHeight = 28;
+                rowLe.flexibleWidth = 1;
+
+                var rowHlg = rowObj.GetComponent<HorizontalLayoutGroup>();
+                rowHlg.spacing = 6;
+                rowHlg.childControlWidth = true;
+                rowHlg.childControlHeight = true;
+                rowHlg.childForceExpandWidth = false;
+                rowHlg.padding = new RectOffset(8, 8, 2, 2);
+
+                CreateTableCell(rowObj.transform, $"{f.Timestamp:HH:mm dd/MM}", 115, Color.white, false);
+                CreateTableCell(rowObj.transform, Truncate(f.Aircraft, 16), 155, Color.white, true);
+                CreateTableCell(rowObj.transform, f.AirKills.ToString(), 45, Color.white, false, TextAlignmentOptions.Center);
+                CreateTableCell(rowObj.transform, f.GroundKills.ToString(), 45, Color.white, false, TextAlignmentOptions.Center);
+
+                string statusColor = f.Result == FlightState.ResultLanded ? "#00FFC8" :
+                                     f.Result == FlightState.ResultEjected ? "#FFB833" : "#FF5555";
+                string statusText = f.Result == FlightState.ResultLanded ? "LANDED" :
+                                    f.Result == FlightState.ResultEjected ? "EJECTED" : "SHOT DOWN";
+                CreateTableCell(rowObj.transform, $"<color={statusColor}><b>{statusText}</b></color>", 95, Color.white, false);
+
+                TimeSpan dur = TimeSpan.FromSeconds(f.DurationSeconds);
+                CreateTableCell(rowObj.transform, $"{dur.Minutes}m {dur.Seconds}s", 60, TextDim, false, TextAlignmentOptions.Right);
+            }
+        }
+
+        private static void RebuildAircraftTable(List<FlightRecord> allFlights, TMP_FontAsset font)
+        {
+            if (aircraftTableContent == null)
+                return;
+
+            foreach (Transform child in aircraftTableContent)
+            {
+                UnityEngine.Object.Destroy(child.gameObject);
+            }
+
+            var byAircraft = new Dictionary<string, AircraftStats>(StringComparer.OrdinalIgnoreCase);
+            foreach (var f in allFlights)
+            {
+                string ac = string.IsNullOrEmpty(f.Aircraft) ? "Unknown" : f.Aircraft;
+                if (!byAircraft.TryGetValue(ac, out var stats))
+                {
+                    stats = new AircraftStats();
+                    byAircraft[ac] = stats;
+                }
+                stats.Flights++;
+                stats.AirKills += f.AirKills;
+                stats.GroundKills += f.GroundKills;
+                stats.DurationSeconds += f.DurationSeconds;
+
+                if (f.Result == FlightState.ResultLanded) stats.Landed++;
+                else if (f.Result == FlightState.ResultEjected) stats.Ejected++;
+                else if (f.Result == FlightState.ResultShotDown) stats.ShotDown++;
+            }
+
+            var sortedAircraft = byAircraft
+                .OrderByDescending(kvp => kvp.Value.Flights)
+                .ThenByDescending(kvp => kvp.Value.AirKills + kvp.Value.GroundKills);
+
+            if (byAircraft.Count == 0)
+            {
+                TMP_Text emptyTxt = CreateText(aircraftTableContent, "No flight records found.", 12, TextDim, font);
+                emptyTxt.gameObject.AddComponent<LayoutElement>().preferredHeight = 30;
+                return;
+            }
+
+            foreach (var kvp in sortedAircraft)
+            {
+                string acName = kvp.Key;
+                var stats = kvp.Value;
+
+                int totalKills = stats.AirKills + stats.GroundKills;
+                float kd = stats.ShotDown > 0 ? (float)totalKills / stats.ShotDown : totalKills;
+                long avgSeconds = stats.Flights > 0 ? stats.DurationSeconds / stats.Flights : 0;
+                TimeSpan avgTime = TimeSpan.FromSeconds(avgSeconds);
+
+                GameObject rowObj = new GameObject($"AcRow_{acName}", typeof(RectTransform), typeof(HorizontalLayoutGroup), typeof(LayoutElement), typeof(Image), typeof(Button));
+                rowObj.transform.SetParent(aircraftTableContent, false);
+
+                var rowImg = rowObj.GetComponent<Image>();
+                bool isSelected = string.Equals(acName, activeAircraftFilter, StringComparison.OrdinalIgnoreCase);
+                rowImg.color = isSelected ? BgButtonActive : new Color(0.12f, 0.16f, 0.22f, 0.6f);
+
+                var rowLe = rowObj.GetComponent<LayoutElement>();
+                rowLe.preferredHeight = 30;
+                rowLe.flexibleWidth = 1;
+
+                var rowHlg = rowObj.GetComponent<HorizontalLayoutGroup>();
+                rowHlg.spacing = 6;
+                rowHlg.childControlWidth = true;
+                rowHlg.childControlHeight = true;
+                rowHlg.childForceExpandWidth = false;
+                rowHlg.padding = new RectOffset(8, 8, 2, 2);
+
+                CreateTableCell(rowObj.transform, Truncate(acName, 20), 170, Color.white, true);
+                CreateTableCell(rowObj.transform, stats.Flights.ToString(), 60, Color.white, false, TextAlignmentOptions.Center);
+                CreateTableCell(rowObj.transform, stats.AirKills.ToString(), 45, AccentBlue, false, TextAlignmentOptions.Center);
+                CreateTableCell(rowObj.transform, stats.GroundKills.ToString(), 45, AccentOrange, false, TextAlignmentOptions.Center);
+                CreateTableCell(rowObj.transform, kd.ToString("F2"), 55, AccentGreen, false, TextAlignmentOptions.Center);
+                CreateTableCell(rowObj.transform, $"{(int)avgTime.TotalMinutes}m {avgTime.Seconds}s", 70, TextDim, false, TextAlignmentOptions.Center);
+                CreateTableCell(rowObj.transform,
+                    $"<color=#00FFC8>{stats.Landed}</color>/<color=#FFB833>{stats.Ejected}</color>/<color=#FF5555>{stats.ShotDown}</color>",
+                    110, Color.white, false, TextAlignmentOptions.Right);
+
+                var btn = rowObj.GetComponent<Button>();
+                btn.onClick.AddListener(() =>
+                {
+                    activeAircraftFilter = string.Equals(activeAircraftFilter, acName, StringComparison.OrdinalIgnoreCase) ? null : acName;
+                    UpdateDashboardData(StatsStorage.LoadAll(), font);
+                    SwitchTab("flights"); // сразу показываем отфильтрованный список вылетов
+                });
             }
         }
 
@@ -613,7 +795,6 @@ namespace NOStatsLogger
 
             if (buttonPrefab != null)
             {
-                // Кнопка открытия папки логов
                 GameObject folderBtnObj = UnityEngine.Object.Instantiate(buttonPrefab, footer.transform);
                 folderBtnObj.name = "OpenFolderButton";
 
@@ -630,7 +811,7 @@ namespace NOStatsLogger
                     try
                     {
                         string dir = System.IO.Path.Combine(BepInEx.Paths.PluginPath, "NOStatsLogger");
-                        if (System.IO.Directory.Exists(dir)) 
+                        if (System.IO.Directory.Exists(dir))
                         {
                             System.Diagnostics.Process.Start(dir);
                         }
@@ -641,7 +822,6 @@ namespace NOStatsLogger
                     }
                 });
 
-                // Кнопка BACK
                 GameObject backBtnObj = UnityEngine.Object.Instantiate(buttonPrefab, footer.transform);
                 backBtnObj.name = "BackButton";
 

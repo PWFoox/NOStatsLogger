@@ -142,6 +142,19 @@ namespace NOStatsLogger
             }
         }
 
+        [HarmonyPatch(typeof(Aircraft), "CheckRadarAlt")]
+        [HarmonyPostfix]
+        private static void Aircraft_CheckRadarAlt_Postfix(Aircraft __instance)
+        {
+            // Runs every 0.1 s of game time; it stops while paused, so the stored value
+            // reflects the last simulated moment before a restart or quit.
+            var state = FlightState.Current;
+            if (state.Active && ReferenceEquals(state.TrackedAircraft, __instance))
+            {
+                state.LastRadarAlt = __instance.radarAlt;
+            }
+        }
+
         [HarmonyPatch(typeof(Aircraft), "OnDestroy")]
         [HarmonyPrefix]
         private static void Aircraft_OnDestroy_Prefix(Aircraft __instance)

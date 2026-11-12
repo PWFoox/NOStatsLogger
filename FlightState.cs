@@ -85,25 +85,20 @@ namespace NOStatsLogger
 
         /// <summary>
         /// Closes a flight that ended without a landing exit, ejection or shoot-down
-        /// (mission restart, quit to menu, aircraft removed). If the aircraft was on the
-        /// ground it counts as landed; otherwise the flight is discarded, so an aborted
-        /// sortie does not add a flight record or XP.
+        /// (mission restart, quit to menu or game, aircraft removed). On the ground it
+        /// counts as landed. In the air it counts as shot down: leaving mid-flight loses
+        /// the aircraft, so quitting cannot be used to dodge a shoot-down in the stats.
         /// </summary>
         public void ResolveInterrupted(string reason)
         {
             if (!Active) return;
 
             string name = AircraftName ?? "Unknown";
+            bool onGround = LastRadarAlt < GroundRadarAltitude;
+            string result = onGround ? ResultLanded : ResultShotDown;
 
-            if (LastRadarAlt < GroundRadarAltitude)
-            {
-                Plugin.Log?.LogInfo($"[FlightState] {name}: {reason} on the ground (radar alt {LastRadarAlt:F1} m), saved as landed");
-                EndFlight(ResultLanded);
-                return;
-            }
-
-            Active = false;
-            Plugin.Log?.LogInfo($"[FlightState] {name} flight discarded: {reason} while airborne (radar alt {LastRadarAlt:F1} m)");
+            Plugin.Log?.LogInfo($"[FlightState] {name}: {reason} {(onGround ? "on the ground" : "while airborne")} (radar alt {LastRadarAlt:F1} m), saved as {result}");
+            EndFlight(result);
         }
     }
 }

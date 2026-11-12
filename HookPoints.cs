@@ -121,6 +121,45 @@ namespace NOStatsLogger
             }
         }
 
+        [HarmonyPatch(typeof(GameManager), nameof(GameManager.FinishGame))]
+        [HarmonyPostfix]
+        private static void GameManager_FinishGame_Postfix(GameResolution resolution)
+        {
+            try
+            {
+                // FinishGame ignores repeat calls, so only act when this call set Victory.
+                if (resolution != GameResolution.Victory || GameManager.gameResolution != GameResolution.Victory) return;
+
+                var state = FlightState.Current;
+                if (!state.Active) return;
+
+                // Surviving to a mission victory counts as a successful sortie.
+                state.EndFlight(FlightState.ResultLanded);
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log?.LogError($"[FinishGame_Postfix] Исключение: {ex}");
+            }
+        }
+
+        [HarmonyPatch(typeof(Aircraft), "OnDestroy")]
+        [HarmonyPrefix]
+        private static void Aircraft_OnDestroy_Prefix(Aircraft __instance)
+        {
+            try
+            {
+                var state = FlightState.Current;
+                if (!state.Active || !ReferenceEquals(state.TrackedAircraft, __instance)) return;
+
+                // Mission restart / quit to menu removes the aircraft without any other event.
+                state.ResolveInterrupted("the aircraft was removed (mission restart or quit)");
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log?.LogError($"[OnDestroy_Prefix] Исключение: {ex}");
+            }
+        }
+
         [HarmonyPatch(typeof(Player), nameof(Player.SetAircraft))]
         [HarmonyPrefix]
         private static void Player_SetAircraft_Prefix(Player __instance)

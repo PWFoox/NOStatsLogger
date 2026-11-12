@@ -22,6 +22,12 @@ namespace NOStatsLogger
         {
             if (aircraft == null) return;
 
+            // Never silently overwrite a flight that is still open.
+            if (Current.Active && !ReferenceEquals(Current.TrackedAircraft, aircraft))
+            {
+                Current.ResolveInterrupted("a new aircraft was spawned");
+            }
+
             string niceName = aircraft.definition != null ? aircraft.definition.unitName : aircraft.name;
 
             Current = new FlightState
@@ -65,6 +71,36 @@ namespace NOStatsLogger
 
             StatsStorage.SaveFlight(record);
             ProgressionManager.AddExperienceFromFlight(record);
+        }
+
+        /// <summary>
+        /// Closes a flight that ended without a landing exit, ejection or shoot-down
+        /// (mission restart, quit to menu, aircraft removed). If the aircraft is on the
+        /// ground it counts as landed; otherwise the flight is discarded, so an aborted
+        /// sortie does not add a flight record or XP.
+        /// </summary>
+        public void ResolveInterrupted(string reason)
+        {
+            if (!Active) return;
+
+            bool landed = false;
+            try
+            {
+                landed = !ReferenceEquals(TrackedAircraft, null) && TrackedAircraft.IsLanded();
+            }
+            catch (Exception)
+            {
+                landed = false;
+            }
+
+            if (landed)
+            {
+                EndFlight(ResultLanded);
+                return;
+            }
+
+            Active = false;
+            Plugin.Log?.LogInfo($"[FlightState] {AircraftName ?? "Unknown"} flight discarded: {reason} while airborne");
         }
     }
 }
